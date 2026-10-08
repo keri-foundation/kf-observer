@@ -91,6 +91,17 @@ parser.add_argument(
     help="Registrar external base URL to poll for bulk TEL. Repeatable.",
 )
 parser.add_argument(
+    "--witness",
+    action="append",
+    dest="witnesses",
+    default=None,
+    help=(
+        "Witness base URL for issuer KEL fallback (GET /log). "
+        "Optional #AID for CESR-DESTINATION, e.g. http://127.0.0.1:5642/#B.... "
+        "Repeatable."
+    ),
+)
+parser.add_argument(
     "--poll",
     action="store",
     default=5.0,
@@ -187,6 +198,7 @@ def runObserver(args, expire=0.0):
                 host=args.host,
                 port=int(args.http),
                 registrars=args.registrars,
+                witnesses=args.witnesses,
                 pollTock=float(args.poll),
                 keypath=args.keypath,
                 certpath=args.certpath,

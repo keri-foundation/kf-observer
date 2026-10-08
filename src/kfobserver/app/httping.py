@@ -147,6 +147,16 @@ class TelQueryEnd:
                 description="q.i must be a single registry SAID"
             )
         if not self.ctx.observer.hasRegistry(regk):
+            # IPEX timing: holder may have just published; pull that SAID now.
+            if self.ctx.registrars:
+                self.ctx.pullRegistry(regk)
+        if not self.ctx.observer.hasRegistry(regk):
+            if regk in self.ctx.observer.pending:
+                raise falcon.HTTPServiceUnavailable(
+                    description=(
+                        f"registry {regk} pending issuer KEL anchors; retry later"
+                    )
+                )
             raise falcon.HTTPNotFound(description=f"unknown registry {regk}")
 
         if route == "tels/head":

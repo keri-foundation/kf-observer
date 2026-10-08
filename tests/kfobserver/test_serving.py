@@ -145,3 +145,77 @@ def test_health():
             assert response.json["status"] == "ok"
         finally:
             ctx.observer.close()
+
+
+def test_ondemand_pull_on_unknown_registry(monkeypatch):
+    """Unknown registry triggers registrar pull before 404."""
+    with openHby(name="kf-obs-pull", base="test", temp=True, version=Vrsn_2_0) as hby:
+        issuer = hby.makeHab(name="issuer")
+        hby.makeHab(name="observer")
+        wallet = hby.makeHab(name="wallet")
+        ripper, bup, _blinder, _acdc, stream = _seedObserverTel(hby, issuer)
+
+        # Build KEL+TEL bulk the way a registrar would.
+        kel = bytearray()
+        for msg in issuer.db.clonePreIter(pre=issuer.pre, gvrsn=Vrsn_2_0):
+            kel.extend(msg)
+        bulk = bytes(kel) + stream
+
+        ctx = makeContext(
+            hby=hby,
+            alias="observer",
+            registrars=["http://127.0.0.1:6632/"],
+        )
+        try:
+            pulled = {"n": 0}
+
+            def _fakePull(hab, url, regk=None, sn=0, timeout=5.0):
+                pulled["n"] += 1
+                assert regk == ripper.said
+                return bulk
+
+            monkeypatch.setattr(
+                "kfobserver.core.pulling.pullOnce", _fakePull
+            )
+
+            client = testing.TestClient(ctx.app)
+            assert not ctx.observer.hasRegistry(ripper.said)
+            resp = _postCesr(client, wallet, _telQuery(wallet, ripper.said))
+            assert resp.status == falcon.HTTP_200
+            assert resp.content == stream
+            assert pulled["n"] == 1
+
+            # Second query hits local store; no extra pull.
+            resp2 = _postCesr(client, wallet, _telQuery(wallet, ripper.said))
+            assert resp2.status == falcon.HTTP_200
+            assert pulled["n"] == 1
+        finally:
+            ctx.observer.close()
+
+
+def test_ondemand_pull_pending_returns_503(monkeypatch):
+    """Escrowed registry after pull returns 503, not 404."""
+    with openHby(name="kf-obs-503", base="test", temp=True, version=Vrsn_2_0) as hby:
+        issuer = hby.makeHab(name="issuer")
+        hby.makeHab(name="observer")
+        wallet = hby.makeHab(name="wallet")
+        ripper = regcept(israid=issuer.pre, stamp=STAMP0)
+        # Not anchored — vet will escrow.
+        tel = telStream(ripper)
+
+        ctx = makeContext(
+            hby=hby,
+            alias="observer",
+            registrars=["http://127.0.0.1:6632/"],
+        )
+        try:
+            monkeypatch.setattr(
+                "kfobserver.core.pulling.pullOnce",
+                lambda *a, **k: tel,
+            )
+            client = testing.TestClient(ctx.app)
+            resp = _postCesr(client, wallet, _telQuery(wallet, ripper.said))
+            assert resp.status == falcon.HTTP_503
+            assert ripper.said in ctx.observer.pending
+        finally:
+            ctx.observer.close()

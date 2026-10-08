@@ -5,6 +5,7 @@ kfobserver.core.pulling module
 Periodic bulk TEL pull from one or more kf-registrar external faces.
 """
 
+import time
 from urllib.parse import urlsplit
 
 from hio.base import doing
@@ -74,18 +75,25 @@ def pullOnce(hab, url, regk=None, sn=0, timeout=5.0):
         portOptional=True,
         timeout=timeout,
     )
-    client.request(
-        method="POST",
-        path=path if path != "" else "/",
-        headers={"Content-Type": CESR_CONTENT_TYPE},
-        body=body,
-    )
-    while not client.responses and not client.requester.error:
-        client.service()
-    if client.requester.error or not client.responses:
-        logger.info("registrar pull failed for %s", url)
+    try:
+        client.request(
+            method="POST",
+            path=path if path != "" else "/",
+            headers={"Content-Type": CESR_CONTENT_TYPE},
+            body=body,
+        )
+        deadline = time.monotonic() + float(timeout)
+        while not client.responses and time.monotonic() < deadline:
+            if client.respondent is not None and client.respondent.errored:
+                break
+            client.service()
+        if not client.responses:
+            logger.info("registrar pull failed for %s", url)
+            return b""
+        response = client.respond()
+    except Exception as ex:
+        logger.info("registrar pull error for %s: %s", url, ex)
         return b""
-    response = client.respond()
     if response.status != 200:
         logger.info(
             "registrar pull %s returned HTTP %s", url, response.status
@@ -97,7 +105,7 @@ def pullOnce(hab, url, regk=None, sn=0, timeout=5.0):
 class RegistrarPuller(doing.DoDoer):
     """Poll configured registrar URLs and ingest verified TEL into Observer."""
 
-    def __init__(self, hab, observer, urls=None, tock=5.0, regk=None):
+    def __init__(self, hab, observer, urls=None, tock=5.0, regk=None, kvy=None):
         """
         Parameters:
             hab (Hab): observer habitat used to sign bulk queries.
@@ -105,11 +113,13 @@ class RegistrarPuller(doing.DoDoer):
             urls (list[str] | None): registrar external base URLs.
             tock (float): poll interval in seconds.
             regk (str | list | None): optional registry filter for every pull.
+            kvy (Kevery | None): Kevery for leading KEL bytes in bulk.
         """
         self.hab = hab
         self.observer = observer
         self.urls = list(urls or [])
         self.regk = regk
+        self.kvy = kvy
         self.tock = float(tock)
         super(RegistrarPuller, self).__init__(
             doers=[doing.doify(self.pullDo, tock=self.tock)]
@@ -125,7 +135,7 @@ class RegistrarPuller(doing.DoDoer):
                 try:
                     raw = pullOnce(self.hab, url, regk=self.regk)
                     if raw:
-                        summary = self.observer.ingest(raw)
+                        summary = self.observer.ingest(raw, kvy=self.kvy)
                         logger.info(
                             "pulled %s bytes from %s: %s",
                             len(raw),

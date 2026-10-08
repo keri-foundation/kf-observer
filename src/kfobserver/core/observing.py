@@ -7,13 +7,73 @@ Verified TEL ingest and query for other parties' registries.
 
 from collections import defaultdict
 
-from keri import help
+from keri import Vrsn_2_0, help
 from keri.acdc import Regery, regeventing
-from keri.core import Number, SerderACDC
+from keri.core import Number, Parser, SerderACDC
 from keri.kering import MissingAnchorError, ValidationError
 
 
 logger = help.ogler.getLogger()
+
+
+def _asBytes(value):
+    """Coerce CESR text or bytes to bytes."""
+    if value is None:
+        return b""
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    return value.encode("utf-8")
+
+
+def ingestKel(kvy, kel):
+    """Parse a CESR KEL stream into the observer Kevery / Habery Baser.
+
+    Parameters:
+        kvy (Kevery): key-event processor bound to hby.db.
+        kel (bytes | bytearray | str): signed KEL clone for TEL issuer(s).
+
+    Returns:
+        None
+    """
+    ims = bytearray(_asBytes(kel))
+    if not ims:
+        return
+    Parser(version=Vrsn_2_0).parse(ims=ims, kvy=kvy)
+    kvy.processEscrows()
+
+
+def splitKelTel(stream):
+    """Split a registrar bulk body into leading KEL CESR and trailing TEL CESR.
+
+    Registrar bulk prepends issuer KEL clones (event + attachments) before
+    ``rip``/``bup`` bodies. TEL starts at the first ACDC ``rip`` or ``bup``.
+
+    Parameters:
+        stream (bytes | bytearray | str): mixed or TEL-only CESR.
+
+    Returns:
+        tuple[bytes, bytes]: (kel, tel). Either may be empty.
+    """
+    ims = bytearray(_asBytes(stream))
+    kel = bytearray()
+    while ims:
+        try:
+            acdc = SerderACDC(raw=ims)
+            if acdc.ilk in ("rip", "bup"):
+                break
+        except Exception:
+            pass
+        before = len(ims)
+        snap = bytes(ims)
+        try:
+            Parser(version=Vrsn_2_0).parseOne(
+                ims=ims, framed=True, processive=False
+            )
+        except Exception:
+            # Not a framed KERI message; treat remainder as TEL.
+            break
+        kel.extend(snap[: before - len(ims)])
+    return bytes(kel), bytes(ims)
 
 
 def parseTelStream(stream):
@@ -66,14 +126,16 @@ class Observer:
     unblind attributes or answer issuance business questions.
     """
 
-    def __init__(self, hby, rgy=None, name=None, base=None, temp=None):
+    def __init__(self, hby, rgy=None, kvy=None, name=None, base=None, temp=None):
         """
         Parameters:
             hby (Habery): habitat whose Baser holds issuer KELs for ``vet``.
             rgy (Regery | None): optional pre-built registry manager.
+            kvy (Kevery | None): optional Kevery for KEL ingest from bulk.
             name, base, temp: forwarded to ``Regery`` when ``rgy`` is None.
         """
         self.hby = hby
+        self.kvy = kvy
         self.rgy = rgy if rgy is not None else Regery(
             hby=hby,
             name=name if name is not None else hby.name,
@@ -88,22 +150,56 @@ class Observer:
         """Close the underlying registry store."""
         self.rgy.close()
 
-    def ingest(self, stream):
-        """Parse, verify, and store a bulk CESR TEL dump.
+    def pendingIssuers(self):
+        """Return issuer AIDs for registries waiting on KEL anchors."""
+        issuers = []
+        seen = set()
+        for rip, _updates in self.pending.values():
+            issuer = rip.sad.get("i") if rip is not None else None
+            if issuer and issuer not in seen:
+                seen.add(issuer)
+                issuers.append(issuer)
+        return issuers
+
+    def ingest(self, stream, kvy=None):
+        """Parse, verify, and store a bulk CESR dump (optional leading KEL).
 
         Parameters:
-            stream (bytes | bytearray): concatenated TEL event bodies.
+            stream (bytes | bytearray | str): KEL+TEL or TEL-only CESR.
+            kvy (Kevery | None): key-event processor for leading KEL bytes.
+                Defaults to ``self.kvy``.
 
         Returns:
             dict: summary with keys ``accepted``, ``pending``, ``rejected``
                 mapping registry SAID to event counts or error strings.
         """
         summary = dict(accepted={}, pending={}, rejected={})
+        kel, tel = splitKelTel(stream)
+        processor = kvy if kvy is not None else self.kvy
+        if kel:
+            if processor is None:
+                summary["rejected"]["kel"] = "Kevery required to ingest KEL bulk"
+                return summary
+            try:
+                ingestKel(processor, kel)
+            except Exception as ex:
+                logger.info("observer ingest KEL parse failed: %s", ex)
+                summary["rejected"]["kel"] = str(ex)
+                return summary
+
+        if not tel:
+            if kel:
+                # KEL-only stream: retry anything waiting on those anchors.
+                moved = self.retryPending()
+                for bucket, items in moved.items():
+                    summary[bucket].update(items)
+            return summary
+
         try:
-            events = parseTelStream(stream)
+            events = parseTelStream(tel)
             groups = groupTelEvents(events)
         except Exception as ex:
-            logger.info("observer ingest parse failed: %s", ex)
+            logger.info("observer ingest TEL parse failed: %s", ex)
             summary["rejected"]["*"] = str(ex)
             return summary
 
@@ -175,24 +271,12 @@ class Observer:
         return bytes(serder.raw) if serder is not None else b""
 
     def cloneTelIter(self, regk, sn=0):
-        """Yield accepted TEL event bodies in sequence from sn inclusive.
-
-        keripy ``RegistryStore`` does not yet expose ``cloneTel``; this walks
-        the same ``tels`` / ``evts`` subdbs the registrar dumps from.
-        """
-        for _keys, _on, saider in self.store.baser.tels.getAllItemIter(
-            keys=regk, on=sn
-        ):
-            serder = self.store.event(saider.qb64)
-            if serder is not None:
-                yield bytes(serder.raw)
+        """Yield accepted TEL event bodies in sequence from sn inclusive."""
+        yield from self.store.cloneTelIter(regk, sn=sn)
 
     def clone(self, regk, sn=0):
         """Return verified TEL CESR for ``regk`` from ``sn`` inclusive."""
-        stream = bytearray()
-        for raw in self.cloneTelIter(regk, sn=sn):
-            stream.extend(raw)
-        return bytes(stream)
+        return self.store.cloneTel(regk, sn=sn)
 
     def hasRegistry(self, regk):
         """True when at least one verified event is stored for ``regk``."""
