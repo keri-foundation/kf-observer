@@ -15,8 +15,43 @@ from keri.app.httping import CESR_CONTENT_TYPE
 from keri.core import query
 from keri.help import helping
 
+from kfobserver.core.cooperative import responseDo
+
 
 logger = help.ogler.getLogger()
+
+
+def _makePullClient(hab, url, regk=None, sn=0, timeout=5.0):
+    """Create and start a registrar bulk HTTP client."""
+    serder = bulkQuery(hab, regk=regk, sn=sn)
+    body = bytes(hab.endorse(serder, last=True, framed=False, gvrsn=Vrsn_2_0))
+    purl = urlsplit(url)
+    path = purl.path or "/"
+    client = http.clienting.Client(
+        scheme=purl.scheme or "http",
+        hostname=purl.hostname or "127.0.0.1",
+        port=purl.port or 80,
+        portOptional=True,
+        timeout=timeout,
+    )
+    client.request(
+        method="POST",
+        path=path,
+        headers={"Content-Type": CESR_CONTENT_TYPE},
+        body=body,
+    )
+    return client
+
+
+def _responseBody(response, url):
+    """Return a successful registrar response body, logging HTTP failures."""
+    if response is None:
+        logger.info("registrar pull failed for %s", url)
+        return b""
+    if response.status != 200:
+        logger.info("registrar pull %s returned HTTP %s", url, response.status)
+        return b""
+    return bytes(response.body or b"")
 
 
 def bulkQuery(hab, regk=None, sn=0, route="tels/bulk"):
@@ -48,7 +83,8 @@ def bulkQuery(hab, regk=None, sn=0, route="tels/bulk"):
 def pullOnce(hab, url, regk=None, sn=0, timeout=5.0):
     """Synchronously POST one bulk query and return response body bytes.
 
-    Uses a short-lived hio HTTP client. Suitable for tests and the poll doer.
+    Uses a short-lived hio HTTP client. Scheduled polling uses the cooperative
+    request path below instead.
 
     Parameters:
         hab (Hab): observer habitat (must be allow-listed on the registrar).
@@ -60,28 +96,8 @@ def pullOnce(hab, url, regk=None, sn=0, timeout=5.0):
     Returns:
         bytes: CESR body on HTTP 200; empty bytes on failure.
     """
-    serder = bulkQuery(hab, regk=regk, sn=sn)
-    body = bytes(hab.endorse(serder, last=True, framed=False, gvrsn=Vrsn_2_0))
-    purl = urlsplit(url)
-    path = purl.path or "/"
-    if not path.endswith("/"):
-        # registrar BulkQueryEnd is mounted at "/"
-        path = path if path else "/"
-
-    client = http.clienting.Client(
-        scheme=purl.scheme or "http",
-        hostname=purl.hostname or "127.0.0.1",
-        port=purl.port or 80,
-        portOptional=True,
-        timeout=timeout,
-    )
     try:
-        client.request(
-            method="POST",
-            path=path if path != "" else "/",
-            headers={"Content-Type": CESR_CONTENT_TYPE},
-            body=body,
-        )
+        client = _makePullClient(hab, url, regk=regk, sn=sn, timeout=timeout)
         deadline = time.monotonic() + float(timeout)
         while not client.responses and time.monotonic() < deadline:
             if client.respondent is not None and client.respondent.errored:
@@ -94,12 +110,7 @@ def pullOnce(hab, url, regk=None, sn=0, timeout=5.0):
     except Exception as ex:
         logger.info("registrar pull error for %s: %s", url, ex)
         return b""
-    if response.status != 200:
-        logger.info(
-            "registrar pull %s returned HTTP %s", url, response.status
-        )
-        return b""
-    return bytes(response.body or b"")
+    return _responseBody(response, url)
 
 
 class RegistrarPuller(doing.DoDoer):
@@ -121,6 +132,7 @@ class RegistrarPuller(doing.DoDoer):
         self.regk = regk
         self.kvy = kvy
         self.tock = float(tock)
+        self.timeout = 5.0
         super(RegistrarPuller, self).__init__(
             doers=[doing.doify(self.pullDo, tock=self.tock)]
         )
@@ -133,7 +145,16 @@ class RegistrarPuller(doing.DoDoer):
         while True:
             for url in self.urls:
                 try:
-                    raw = pullOnce(self.hab, url, regk=self.regk)
+                    client = _makePullClient(
+                        self.hab,
+                        url,
+                        regk=self.regk,
+                        timeout=self.timeout,
+                    )
+                    response = yield from responseDo(
+                        self, client, timeout=self.timeout
+                    )
+                    raw = _responseBody(response, url)
                     if raw:
                         summary = self.observer.ingest(raw, kvy=self.kvy)
                         logger.info(

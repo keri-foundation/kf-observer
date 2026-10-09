@@ -10,10 +10,33 @@ from collections import defaultdict
 from keri import Vrsn_2_0, help
 from keri.acdc import Regery, regeventing
 from keri.core import Number, Parser, SerderACDC
+from keri.core.coring import Saider
 from keri.kering import MissingAnchorError, ValidationError
 
 
 logger = help.ogler.getLogger()
+
+
+def _acceptTelChain(store, regk, chain):
+    """Persist a verified chain without replacing slots or regressing its head."""
+    sequenced = [(Number(numh=serder.sad["n"]).num, serder) for serder in chain]
+    for sn, serder in sequenced:
+        current = store.seqEvent(regk, sn)
+        if current is not None and current.said != serder.said:
+            return f"conflicting TEL event at registry {regk} sequence {sn}"
+
+    for sn, serder in sequenced:
+        if store.seqEvent(regk, sn) is not None:
+            continue
+
+        # Keep valid historical gaps queryable while only moving the head
+        # forward. RegistryStore.accept pins the head unconditionally.
+        store.putEvent(serder)
+        store.baser.tels.put(keys=regk, on=sn, val=Saider(qb64=serder.said))
+        head = store.headEvent(regk)
+        if head is None or sn > Number(numh=head.sad["n"]).num:
+            store.baser.heads.pin(keys=regk, val=Saider(qb64=serder.said))
+    return None
 
 
 def _asBytes(value):
@@ -255,9 +278,11 @@ class Observer:
         chain = [rip] + sorted(
             updates, key=lambda s: Number(numh=s.sad["n"]).num
         )
-        for serder in chain:
-            sn = Number(numh=serder.sad["n"]).num
-            self.store.accept(regk, sn, serder)
+        conflict = _acceptTelChain(self.store, regk, chain)
+        if conflict is not None:
+            self.pending.pop(regk, None)
+            logger.info("observer rejected registry %s: %s", regk, conflict)
+            return "rejected", conflict
         self.pending.pop(regk, None)
         return "accepted", len(chain)
 
