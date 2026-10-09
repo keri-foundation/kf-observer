@@ -161,6 +161,16 @@ def test_conflicting_anchored_tel_fork_does_not_replace_history():
         finally:
             observer.close()
 
+        reverse = Observer(hby=hby, name="obs-fork-reverse", base="test")
+        try:
+            assert ripper.said in reverse.ingest(telStream(ripper, second))["accepted"]
+            result = reverse.ingest(telStream(ripper, first))
+            assert ripper.said in result["rejected"]
+            assert reverse.last(ripper.said).said == second.said
+            assert reverse.clone(ripper.said) == telStream(ripper, second)
+        finally:
+            reverse.close()
+
 
 def test_replay_of_older_tel_keeps_head_monotonic_and_forward_progress_works():
     """Known history replay leaves the head in place; a newer event advances it."""
