@@ -132,6 +132,82 @@ def test_unanchored_bulk_is_not_served():
             observer.close()
 
 
+def test_conflicting_anchored_tel_fork_does_not_replace_history():
+    """A second valid seal for one registry sequence cannot replace its history."""
+    with habbing.openHab(name="obs-fork", temp=True, version=Vrsn_2_0) as (hby, hab):
+        ripper = makeRegistry(hab)
+        acdc = makeAcdc(hab, regid=ripper.said, name="forked-history")
+        _blinder, first = makeUpdate(
+            ripper.said, ripper.said, acdc.said, "issued", sn=1, stamp=STAMP1
+        )
+        _other, second = makeUpdate(
+            ripper.said,
+            ripper.said,
+            acdc.said,
+            "revoked",
+            sn=1,
+            stamp=STAMP1,
+            salt=Salter(raw=b"fedcba9876543210").qb64,
+        )
+        anchor(hab, first, second)
+
+        observer = Observer(hby=hby)
+        try:
+            assert ripper.said in observer.ingest(telStream(ripper, first))["accepted"]
+            result = observer.ingest(telStream(ripper, second))
+            assert ripper.said in result["rejected"]
+            assert observer.last(ripper.said).said == first.said
+            assert observer.clone(ripper.said) == telStream(ripper, first)
+        finally:
+            observer.close()
+
+        reverse = Observer(hby=hby, name="obs-fork-reverse", base="test")
+        try:
+            assert ripper.said in reverse.ingest(telStream(ripper, second))["accepted"]
+            result = reverse.ingest(telStream(ripper, first))
+            assert ripper.said in result["rejected"]
+            assert reverse.last(ripper.said).said == second.said
+            assert reverse.clone(ripper.said) == telStream(ripper, second)
+        finally:
+            reverse.close()
+
+
+def test_replay_of_older_tel_keeps_head_monotonic_and_forward_progress_works():
+    """Known history replay leaves the head in place; a newer event advances it."""
+    with habbing.openHab(name="obs-replay", temp=True, version=Vrsn_2_0) as (hby, hab):
+        ripper = makeRegistry(hab)
+        acdc = makeAcdc(hab, regid=ripper.said, name="monotonic-history")
+        _one, first = makeUpdate(
+            ripper.said, ripper.said, acdc.said, "issued", sn=1, stamp=STAMP1
+        )
+        _two, second = makeUpdate(
+            ripper.said, first.said, acdc.said, "revoked", sn=2, stamp=STAMP1
+        )
+        _three, third = makeUpdate(
+            ripper.said, second.said, acdc.said, "reinstated", sn=3, stamp=STAMP1
+        )
+        anchor(hab, first, second, third)
+
+        observer = Observer(hby=hby)
+        try:
+            assert (
+                ripper.said
+                in observer.ingest(telStream(ripper, first, second))["accepted"]
+            )
+            assert observer.last(ripper.said).said == second.said
+            assert ripper.said in observer.ingest(telStream(ripper, first))["accepted"]
+            assert observer.last(ripper.said).said == second.said
+            assert observer.clone(ripper.said) == telStream(ripper, first, second)
+
+            assert (
+                ripper.said
+                in observer.ingest(telStream(ripper, first, second, third))["accepted"]
+            )
+            assert observer.last(ripper.said).said == third.said
+        finally:
+            observer.close()
+
+
 def test_tampered_bulk_is_rejected():
     """Misdigested bup is not stored or served."""
     with habbing.openHab(name="obs-tamper", temp=True, version=Vrsn_2_0) as (hby, hab):
