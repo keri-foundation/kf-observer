@@ -13,6 +13,7 @@ from keri.core.signing import Salter
 from hio.base import doing
 from hio.base.doing import Doist
 from hio.core import http
+import pytest
 
 from kfobserver.core import keling
 from kfobserver.core.cooperative import responseDo
@@ -115,6 +116,7 @@ def test_ingest_kel_bytes_into_observer_baser():
 
 def test_cooperative_http_wait_allows_other_scheduled_work_to_advance():
     """An unfinished HTTP response yields control to unrelated doers."""
+
     class NoResponseClient:
         responses = []
         respondent = None
@@ -256,3 +258,62 @@ def test_stale_witness_response_falls_through_to_witness_with_anchor(monkeypatch
     assert requested == ["http://stale/", "http://current/"]
     assert observer.received == [b"stale-kel", b"required-kel"]
     assert observer.pending is False
+
+
+@pytest.mark.parametrize(
+    ("responses", "expected_urls", "pending_after_pass"),
+    [
+        ((b"required-kel", b"unused"), ["http://first/"], False),
+        ((b"stale-kel", b"stale-kel"), ["http://first/", "http://second/"], True),
+    ],
+)
+def test_witness_search_stops_on_state_or_after_all_witnesses(
+    monkeypatch, responses, expected_urls, pending_after_pass
+):
+    """A satisfying first witness stops; stale results visit each witness once."""
+    issuer = "issuer-aid"
+
+    class PendingObserver:
+        pending = True
+        received = []
+
+        def pendingIssuers(self):
+            return [issuer] if self.pending else []
+
+        def retryPending(self):
+            if self.received and self.received[-1] == b"required-kel":
+                self.pending = False
+            return {"accepted": {}, "pending": {}, "rejected": {}}
+
+    observer = PendingObserver()
+    requested = []
+
+    def fakeFetchDo(owner, issuer_aid, url, aid=None, **kwa):
+        requested.append(url)
+        yield 0.1
+        return responses[len(requested) - 1]
+
+    monkeypatch.setattr(keling, "fetchKelDo", fakeFetchDo)
+    monkeypatch.setattr(
+        keling, "ingestKel", lambda _kvy, raw: observer.received.append(raw)
+    )
+    fetcher = WitnessKelFetcher(
+        observer=observer,
+        kvy=object(),
+        witnesses=[{"url": "http://first/"}, {"url": "http://second/"}],
+        tock=0.1,
+    )
+    fetchDo = fetcher.fetchDo(tymth=lambda: 0.0, tock=0.1)
+
+    next(fetchDo)  # initial poll interval
+    next(fetchDo)  # first witness request yields
+    assert requested == ["http://first/"]
+    if len(expected_urls) == 2:
+        next(fetchDo)  # stale result starts the second witness request
+        assert requested == expected_urls
+        next(fetchDo)  # second stale result ends this bounded pass
+    else:
+        next(fetchDo)  # satisfying result stops this pass
+
+    assert requested == expected_urls
+    assert observer.pending is pending_after_pass

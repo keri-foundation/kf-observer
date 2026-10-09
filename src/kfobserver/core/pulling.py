@@ -151,9 +151,7 @@ class RegistrarPuller(doing.DoDoer):
                         regk=self.regk,
                         timeout=self.timeout,
                     )
-                    response = yield from responseDo(
-                        self, client, timeout=self.timeout
-                    )
+                    response = yield from responseDo(self, client, timeout=self.timeout)
                     raw = _responseBody(response, url)
                     if raw:
                         summary = self.observer.ingest(raw, kvy=self.kvy)

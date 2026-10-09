@@ -275,9 +275,7 @@ class Observer:
             logger.info("observer rejected registry %s: %s", regk, ex)
             return "rejected", str(ex)
 
-        chain = [rip] + sorted(
-            updates, key=lambda s: Number(numh=s.sad["n"]).num
-        )
+        chain = [rip] + sorted(updates, key=lambda s: Number(numh=s.sad["n"]).num)
         conflict = _acceptTelChain(self.store, regk, chain)
         if conflict is not None:
             self.pending.pop(regk, None)

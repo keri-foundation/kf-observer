@@ -190,13 +190,19 @@ def test_replay_of_older_tel_keeps_head_monotonic_and_forward_progress_works():
 
         observer = Observer(hby=hby)
         try:
-            assert ripper.said in observer.ingest(telStream(ripper, first, second))["accepted"]
+            assert (
+                ripper.said
+                in observer.ingest(telStream(ripper, first, second))["accepted"]
+            )
             assert observer.last(ripper.said).said == second.said
             assert ripper.said in observer.ingest(telStream(ripper, first))["accepted"]
             assert observer.last(ripper.said).said == second.said
             assert observer.clone(ripper.said) == telStream(ripper, first, second)
 
-            assert ripper.said in observer.ingest(telStream(ripper, first, second, third))["accepted"]
+            assert (
+                ripper.said
+                in observer.ingest(telStream(ripper, first, second, third))["accepted"]
+            )
             assert observer.last(ripper.said).said == third.said
         finally:
             observer.close()
