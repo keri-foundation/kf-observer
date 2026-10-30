@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 import falcon
 from hio.base import doing
 from hio.core import http
+from hio.help import decking
 from keri import help
 from keri.app.indirecting import createHttpServer
 from keri.core import Kevery
@@ -230,6 +231,8 @@ def makeContext(hby, alias="observer", registrars=None, witnesses=None, **kwa):
     cf = _configWithKram(hby.cf)
     kvy = Kevery(
         db=hby.db,
+        # This service has no consumer for Kevery/KRAM outbound cues.
+        cues=decking.Deck(maxlen=0),
         cf=cf,
         enableKram=True,
         lax=True,

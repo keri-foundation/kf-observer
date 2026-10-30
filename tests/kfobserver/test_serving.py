@@ -17,7 +17,7 @@ from keri import Vrsn_1_0, Vrsn_2_0
 from keri.acdc import acdcmap, blindate, regcept
 from keri.app.habbing import openHby
 from keri.app.httping import CESR_CONTENT_TYPE
-from keri.core import Blinder, Parser, SerderACDC, SerderKERI, eventing, query
+from keri.core import Blinder, Parser, SerderACDC, SerderKERI, Texter, eventing, query
 from keri.core.coring import Diger
 from keri.core.counting import Codens, Counter
 from keri.core.signing import Salter
@@ -137,7 +137,8 @@ def _signedTelQuery(client, hab, regk, endorser=None):
     )
 
 
-def test_put_introduces_remote_signer_for_authenticated_tel_query():
+@pytest.mark.parametrize("grouped", [False, True], ids=["messages", "generic-group"])
+def test_put_introduces_remote_signer_for_authenticated_tel_query(grouped):
     """PUT makes public history available; KRAM still authenticates POST."""
     with _remoteSignerLab("observer-remote-signer") as (
         issuer,
@@ -153,6 +154,26 @@ def test_put_introduces_remote_signer_for_authenticated_tel_query():
         assert _signedTelQuery(client, signer, regk).status == falcon.HTTP_401
 
         replay = _signerKel(signer)
+        if grouped:
+            gvc = Counter(
+                countB64=Counter.verToB64(major=2, minor=0),
+                code=Codens.KERIACDCGenusVersion,
+                version=Vrsn_2_0,
+            ).qb64b
+            serder = SerderKERI(raw=replay)
+            body = Counter.enclose(
+                qb64=Texter(raw=serder.raw).qb64b,
+                code=Codens.NonNativeBodyGroup,
+                version=Vrsn_2_0,
+            )
+            message = Counter.enclose(
+                qb64=gvc + body + replay[serder.size:],
+                code=Codens.BodyWithAttachmentGroup,
+                version=Vrsn_2_0,
+            )
+            replay = gvc + Counter.enclose(
+                qb64=gvc + message, code=Codens.GenericGroup, version=Vrsn_2_0
+            )
         response = _putKel(client, replay, f"{CESR_CONTENT_TYPE}; charset=utf-8")
         assert response.status == falcon.HTTP_204
         assert response.content == b""
@@ -175,6 +196,26 @@ def test_put_introduces_remote_signer_for_authenticated_tel_query():
             ).status
             == falcon.HTTP_400
         )
+
+
+def test_unused_outbound_cues_do_not_accumulate():
+    """Introductions and unknown signers leave no unused outbound cue backlog."""
+    with _remoteSignerLab("observer-unused-cues") as (
+        _issuer,
+        signer,
+        _observerHby,
+        ctx,
+        client,
+        regk,
+        _tel,
+    ):
+        for _ in range(3):
+            assert _signedTelQuery(client, signer, regk).status == falcon.HTTP_401
+            assert not ctx.kvy.cues
+
+        assert _putKel(client, _signerKel(signer)).status == falcon.HTTP_204
+        assert not ctx.kvy.cues
+        assert _signedTelQuery(client, signer, regk).status == falcon.HTTP_200
 
 
 def test_put_replay_is_idempotent_and_accepts_older_history_after_rotation():

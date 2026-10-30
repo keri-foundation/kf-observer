@@ -19,6 +19,7 @@ from keri.kering import (
     MissingAuthAttachmentError,
     MissingSenderKeyStateError,
     Ilks,
+    TopLevelStreamError,
     ValidationError,
 )
 
@@ -43,6 +44,9 @@ class _KELReplayParser(Parser):
     def msgParsator(self, *args, **kwa):
         try:
             exts = yield from super().msgParsator(*args, **kwa)
+        except TopLevelStreamError:
+            # Native group parsing handles this control-flow signal.
+            raise
         except Exception as ex:
             self.errors.append(ex)
             raise

@@ -5,8 +5,11 @@ tests.kfobserver.test_observing module
 Ingest, query, and reject-unverified tests for the observer TEL store.
 """
 
+import pytest
+
 from keri import Vrsn_2_0, Ilks
-from keri.acdc import acdcmap, blindate, regeventing, regcept
+from keri.acdc import Regery, acdcmap, blindate, regeventing, regcept
+from keri.acdc.regbasing import RegBaser
 from keri.app import habbing
 from keri.core import Blinder, SerderACDC
 from keri.core.signing import Salter
@@ -172,8 +175,11 @@ def test_conflicting_anchored_tel_fork_does_not_replace_history():
             reverse.close()
 
 
-def test_replay_of_older_tel_keeps_head_monotonic_and_forward_progress_works():
-    """Known history replay leaves the head in place; a newer event advances it."""
+@pytest.mark.parametrize("missing_head", [True, False], ids=["missing", "stale"])
+def test_replay_repairs_head_preserves_history_and_allows_forward_progress(
+    tmp_path, missing_head
+):
+    """Replay repairs an interrupted head write without replacing accepted history."""
     with habbing.openHab(name="obs-replay", temp=True, version=Vrsn_2_0) as (hby, hab):
         ripper = makeRegistry(hab)
         acdc = makeAcdc(hab, regid=ripper.said, name="monotonic-history")
@@ -188,13 +194,35 @@ def test_replay_of_older_tel_keeps_head_monotonic_and_forward_progress_works():
         )
         anchor(hab, first, second, third)
 
-        observer = Observer(hby=hby)
+        def openObserver():
+            baser = RegBaser(name="obs-replay", temp=False, headDirPath=str(tmp_path))
+            return Observer(hby=hby, rgy=Regery(hby=hby, baser=baser))
+
+        observer = openObserver()
         try:
             assert (
                 ripper.said
                 in observer.ingest(telStream(ripper, first, second))["accepted"]
             )
             assert observer.last(ripper.said).said == second.said
+            slots = [observer.store.seqSaider(ripper.said, sn).qb64 for sn in range(3)]
+            if missing_head:
+                observer.store.baser.heads.rem(keys=ripper.said)
+            else:
+                observer.store.baser.heads.pin(
+                    keys=ripper.said, val=observer.store.seqSaider(ripper.said, 0)
+                )
+            observer.close()
+            observer = openObserver()
+            assert (
+                ripper.said
+                in observer.ingest(telStream(ripper, first, second))["accepted"]
+            )
+            assert observer.hasRegistry(ripper.said)
+            assert observer.last(ripper.said).said == second.said
+            assert [
+                observer.store.seqSaider(ripper.said, sn).qb64 for sn in range(3)
+            ] == slots
             assert ripper.said in observer.ingest(telStream(ripper, first))["accepted"]
             assert observer.last(ripper.said).said == second.said
             assert observer.clone(ripper.said) == telStream(ripper, first, second)

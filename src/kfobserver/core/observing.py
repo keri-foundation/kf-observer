@@ -29,13 +29,17 @@ def _acceptTelChain(store, regk, chain):
         if store.seqEvent(regk, sn) is not None:
             continue
 
-        # Keep valid historical gaps queryable while only moving the head
-        # forward. RegistryStore.accept pins the head unconditionally.
         store.putEvent(serder)
         store.baser.tels.put(keys=regk, on=sn, val=Saider(qb64=serder.said))
-        head = store.headEvent(regk)
-        if head is None or sn > Number(numh=head.sad["n"]).num:
-            store.baser.heads.pin(keys=regk, val=Saider(qb64=serder.said))
+
+    # Repair the head cache even when replay only contains accepted events.
+    latest = max(
+        store.baser.tels.getAllItemIter(keys=regk),
+        key=lambda item: item[1],
+        default=None,
+    )
+    if latest is not None:
+        store.baser.heads.pin(keys=regk, val=latest[2])
     return None
 
 
