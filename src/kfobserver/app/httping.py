@@ -256,6 +256,12 @@ class TelQueryEnd:
 
         kramer = self.ctx.kvy.kramer
         if kramer is not None:
+            # KRAM's get() sees only cached Kevers. Reload accepted sender
+            # history after a restart before applying normal authentication.
+            try:
+                self.ctx.kvy.kevers[serder.pre]
+            except KeyError:
+                pass  # KRAM retains responsibility for unknown-sender rejection.
             kramer.reconcileConfig()
             try:
                 result = kramer.intake(serder, kwa)

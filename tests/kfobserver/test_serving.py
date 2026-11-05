@@ -868,3 +868,44 @@ def test_ondemand_query_returns_same_request_without_stalling_scheduler(
                         doist.exit()
             finally:
                 ctx.observer.close()
+
+
+@pytest.mark.parametrize("replay_after_restart", [False, True])
+def test_persisted_remote_signer_authenticates_after_database_reopen(replay_after_restart):
+    """Accepted history survives restart without weakening query authentication."""
+    with _remoteSignerLab("observer-restarted-signer") as (
+        _issuer,
+        signer,
+        observerHby,
+        _ctx,
+        client,
+        regk,
+        tel,
+    ):
+        signer.rotate()
+        replay = _signerKel(signer)
+        assert _putKel(client, replay).status == falcon.HTTP_204
+        db = observerHby.db
+        path = db.path
+        db.kevers.clear()
+        db.reopen(reuse=True)
+        assert db.path == path
+        assert db.states.get(signer.pre) is not None
+        assert not dict.__contains__(db.kevers, signer.pre)
+        if replay_after_restart:
+            assert _putKel(client, replay).status == falcon.HTTP_204
+            assert not dict.__contains__(db.kevers, signer.pre)
+        response = _signedTelQuery(client, signer, regk)
+        assert response.status == falcon.HTTP_200
+        assert response.content == tel
+        with openHby(
+            name="restart-attacker", base="test", temp=True, version=Vrsn_2_0
+        ) as attackerHby:
+            attacker = attackerHby.makeHab(name="attacker")
+            assert _signedTelQuery(client, attacker, regk).status == falcon.HTTP_401
+            assert db.states.get(attacker.pre) is None
+            assert _putKel(client, _signerKel(attacker)).status == falcon.HTTP_204
+            assert (
+                _signedTelQuery(client, signer, regk, endorser=attacker).status
+                == falcon.HTTP_401
+            )
