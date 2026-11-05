@@ -24,7 +24,11 @@ wallet / verifier  -->  kf-observer  -->  kf-registrar (bulk only)
 - **Serve** (default `127.0.0.1:6633`): signed V2 `qry` POST for one registry
   SAID — last / all / since `sn`. No blinded-attribute disclosure. No
   “is this ACDC issued?” business logic (that is `vet` on the verifier).
-  Unknown registries trigger an on-demand registrar pull (IPEX timing).
+  Queries only read the local verified cache. Unknown registries return 404;
+  registries awaiting issuer evidence return 503. Clients may retry after a
+  background poll. A wallet query never triggers a registrar request.
+  Stored TEL anchors are checked against the current accepted issuer KEL before
+  serving, including after a recovery rotation replaces an earlier anchor.
 
 ## Query contract (wallet / verifier / IPEX)
 
@@ -106,6 +110,12 @@ This node’s AID must be allow-listed on each registrar (`--observer` /
 Witness `GET /log` is a **fallback** when bulk TEL arrives without a usable
 issuer KEL. Prefer registrar bulk that already includes the KEL (minted TELs
 and admin `POST /ingest`).
+
+Background registrar polls request all registries and include complete accepted
+issuer and delegator histories with their signatures and receipts. This verifies
+the history provided by the registrar; it does not establish that no later KEL
+event exists elsewhere. Independent continuous observation and authenticated
+witness endpoint discovery are not provided by this bulk synchronization path.
 
 ## Tests
 

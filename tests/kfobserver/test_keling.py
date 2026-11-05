@@ -8,8 +8,9 @@ KEL/TEL split, KEL ingest, and witness fallback helpers.
 from keri import Vrsn_2_0
 from keri.acdc import acdcmap, blindate, regcept
 from keri.app.habbing import openHab, openHby
-from keri.core import Blinder, Kevery, Parser
+from keri.core import Blinder, Kevery, Number, Parser, Saider, SealSource, messagize
 from keri.core.signing import Salter
+from keri.kering import ValidationError
 import ssl
 from types import SimpleNamespace
 
@@ -110,6 +111,82 @@ def test_ingest_kel_bytes_into_observer_baser():
         kvy = Kevery(db=hby.db, lax=True, local=False)
         ingestKel(kvy, kel)
         assert issuer in hby.kevers
+
+
+@pytest.mark.parametrize("invalid", ["signature", "truncated", "trailing"])
+def test_bulk_rejects_invalid_issuer_history(invalid):
+    """Malformed input and a wrong signature cannot introduce issuer state."""
+    with openHab(name="invalid-bulk", temp=True, version=Vrsn_2_0) as (remote, issuer), \
+            openHby(name="invalid-verifier", temp=True, version=Vrsn_2_0) as hby:
+        raw = _kelClone(issuer)
+        if invalid == "signature":
+            attacker = remote.makeHab(name="attacker")
+            serder = issuer.kever.serder
+            raw = messagize(serder, sigers=attacker.sign(ser=serder.raw, indexed=True),
+                            gvrsn=Vrsn_2_0)
+        elif invalid == "truncated":
+            raw = raw[:-1]
+        else:
+            raw += b"invalid trailing bytes"
+        with pytest.raises(ValidationError):
+            ingestKel(Kevery(db=hby.db, lax=True, local=False), raw)
+        assert issuer.pre not in hby.kevers
+
+
+def test_bulk_waits_for_required_witness_receipts():
+    """A later complete replay resolves native escrow without weakening toad."""
+    with openHab(name="bulk-witness", temp=True, transferable=False,
+                 version=Vrsn_2_0) as (remote, witness), \
+            openHby(name="receipt-verifier", temp=True, version=Vrsn_2_0) as hby:
+        issuer = remote.makeHab(name="issuer", wits=[witness.pre], toad=1)
+        inception = issuer.kever.serder
+        rip = regcept(israid=issuer.pre)
+        issuer.interact(data=[dict(s=rip.sad["n"], d=rip.said)])
+        observer = Observer(hby=hby, kvy=Kevery(db=hby.db, lax=True, local=False))
+        try:
+            pending = observer.ingest(_kelClone(issuer) + rip.raw)
+            assert rip.said in pending["pending"]
+            assert issuer.pre not in hby.kevers
+            kel = bytearray()
+            for serder in (inception, issuer.kever.serder):
+                kel.extend(messagize(
+                    serder, sigers=issuer.sign(ser=serder.raw, indexed=True),
+                    wigers=witness.sign(ser=serder.raw, indexed=True), gvrsn=Vrsn_2_0,
+                ))
+            accepted = observer.ingest(bytes(kel) + rip.raw)
+            assert rip.said in accepted["accepted"]
+            assert observer.clone(rip.said) == rip.raw
+        finally:
+            observer.close()
+
+
+def test_bulk_waits_for_delegator_history():
+    """A delegate cannot anchor TELs until its delegation is verified."""
+    with openHab(name="bulk-delegator", temp=True, version=Vrsn_2_0) as (remote, delegator), \
+            openHby(name="delegation-verifier", temp=True, version=Vrsn_2_0) as hby:
+        issuer = remote.makeHab(name="issuer", delpre=delegator.pre)
+        inception = issuer.kever.serder
+        rip = regcept(israid=issuer.pre)
+        issuer.interact(data=[dict(s=rip.sad["n"], d=rip.said)])
+        observer = Observer(hby=hby, kvy=Kevery(db=hby.db, lax=True, local=False))
+        try:
+            pending = observer.ingest(_kelClone(issuer) + rip.raw)
+            assert rip.said in pending["pending"]
+            assert issuer.pre not in hby.kevers
+            delegator.interact(data=[dict(i=issuer.pre, s="0", d=inception.said)],
+                               gvrsn=Vrsn_2_0)
+            bond = SealSource(s=Number(num=delegator.kever.sn),
+                              d=Saider(qb64=delegator.kever.serder.said))
+            dip = messagize(inception, sigers=issuer.sign(ser=inception.raw, indexed=True),
+                            bonds=[bond], gvrsn=Vrsn_2_0)
+            anchor = issuer.kever.serder
+            ixn = messagize(anchor, sigers=issuer.sign(ser=anchor.raw, indexed=True),
+                            gvrsn=Vrsn_2_0)
+            accepted = observer.ingest(_kelClone(delegator) + dip + ixn + rip.raw)
+            assert rip.said in accepted["accepted"]
+            assert observer.clone(rip.said) == rip.raw
+        finally:
+            observer.close()
 
 
 def test_stale_witness_response_falls_through_to_witness_with_anchor(monkeypatch):
@@ -278,7 +355,7 @@ def test_default_poll_services_http_and_delays_between_passes(
             assert req.content_type == pulling.CESR_CONTENT_TYPE
             assert dom.serder.ked["r"] == "tels/bulk"
             assert dom.serder.ked["i"] == hab.pre
-            assert dom.serder.ked["q"] == {"i": "registry"}
+            assert dom.serder.ked["q"] == {}
             assert dom.serder.pvrsn == Vrsn_2_0
             assert dom.lsgs
             assert raw == bytes(
@@ -333,7 +410,7 @@ def test_default_poll_services_http_and_delays_between_passes(
             url = f"http://127.0.0.1:{server.servant.ha[1]}/"
             observer = ObserverStub()
             if kind == "registrar":
-                poller = RegistrarPuller(hab, observer, urls=[url], regk="registry")
+                poller = RegistrarPuller(hab, observer, urls=[url])
             else:
                 poller = WitnessKelFetcher(
                     observer, object(), witnesses=[{"url": url, "aid": "witness-aid"}]
@@ -590,3 +667,37 @@ def test_request_cancellation_closes_client(monkeypatch, kind):
             )
     assert len(clients) == 1
     assert clients[0].connector.cs is None
+
+
+def test_complete_history_replay_invalidates_superseded_registry_anchor():
+    """A recovery is replayed, and an old accepted TEL is no longer served."""
+    from keri.core import rotate
+    from keri.kering import MissingAnchorError
+
+    with openHab(name="recovery-source", temp=True, version=Vrsn_2_0) as (source, issuer), \
+            openHby(name="recovery-observer", temp=True, version=Vrsn_2_0) as hby:
+        inception = issuer.kever.serder
+        rip = regcept(israid=issuer.pre)
+        issuer.interact(data=[dict(s=rip.sad["n"], d=rip.said)])
+        kvy = Kevery(db=hby.db, lax=True, local=False)
+        observer = Observer(hby=hby, kvy=kvy)
+        try:
+            assert rip.said in observer.ingest(_kelClone(issuer) + rip.raw)["accepted"]
+            assert observer.clone(rip.said) == rip.raw
+            verfers, digers = source.mgr.rotate(pre=issuer.pre, temp=True)
+            recovery = rotate(pre=issuer.pre, keys=[v.qb64 for v in verfers],
+                              dig=inception.said, sn=1,
+                              ndigs=[d.qb64 for d in digers], version=Vrsn_2_0)
+            sigers = issuer.sign(ser=recovery.raw, verfers=verfers, rotated=True)
+            source.kvy.processEvent(serder=recovery, sigers=sigers)
+            stream = _kelClone(issuer) + rip.raw
+            for _ in range(2):
+                assert rip.said in observer.ingest(stream)["pending"]
+                assert hby.kevers[issuer.pre].serder.said == recovery.said
+                with pytest.raises(MissingAnchorError):
+                    observer.clone(rip.said)
+            issuer.interact(data=[dict(s=rip.sad["n"], d=rip.said)])
+            assert rip.said in observer.ingest(_kelClone(issuer) + rip.raw)["accepted"]
+            assert observer.clone(rip.said) == rip.raw
+        finally:
+            observer.close()

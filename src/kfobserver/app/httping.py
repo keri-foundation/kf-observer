@@ -8,7 +8,6 @@ Falcon resources for the wallet/verifier verified-TEL query face.
 import json
 
 import falcon
-from hio.help import helping as hiohelping
 from keri import Vrsn_2_0
 from keri.app.httping import CESR_ATTACHMENT_HEADER, CESR_CONTENT_TYPE
 from keri.core import Number, Parser, SerderKERI
@@ -18,6 +17,7 @@ from keri.kering import (
     MaterialError,
     MissingAuthAttachmentError,
     MissingSenderKeyStateError,
+    MissingAnchorError,
     Ilks,
     TopLevelStreamError,
     ValidationError,
@@ -275,29 +275,19 @@ class TelQueryEnd:
             raise falcon.HTTPBadRequest(
                 description="q.i must be a single registry SAID"
             )
-        if not self.ctx.observer.hasRegistry(regk) and self.ctx.registrars:
-            # HIO advances the stream cooperatively and defers status until data.
-            rep.stream = self.queryDo(regk, route, qry)
-            return
-        data = self.queryData(regk, route, qry)
+        try:
+            data = self.queryData(regk, route, qry)
+        except MissingAnchorError as ex:
+            raise falcon.HTTPServiceUnavailable(
+                description="Registry anchors await accepted issuer history"
+            ) from ex
+        except ValidationError as ex:
+            raise falcon.HTTPConflict(
+                description="Registry history failed verification"
+            ) from ex
         rep.set_header("Content-Type", CESR_CONTENT_TYPE)
         rep.status = falcon.HTTP_200
         rep.data = data
-
-    @hiohelping.attributize
-    def queryDo(self, me, regk, route, qry):
-        """Defer the TEL response while HIO services the registrar request."""
-        yield from self.ctx.pullRegistry(regk)
-        try:
-            data = self.queryData(regk, route, qry)
-        except falcon.HTTPError as ex:
-            me._status = ex.status
-            me._headers = {"Content-Type": "application/json"}
-            yield ex.to_json()
-        else:
-            me._status = falcon.HTTP_200
-            me._headers = {"Content-Type": CESR_CONTENT_TYPE}
-            yield data
 
     def queryData(self, regk, route, qry):
         """Read verified TEL or retain the existing missing/pending response."""

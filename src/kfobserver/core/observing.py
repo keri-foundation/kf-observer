@@ -9,9 +9,13 @@ from collections import defaultdict
 
 from keri import Vrsn_2_0, help
 from keri.acdc import Regery, regeventing
-from keri.core import Number, Parser, SerderACDC
+from keri.core import Number, Parser, SerderACDC, SerderKERI
 from keri.core.coring import Saider
-from keri.kering import MissingAnchorError, ValidationError
+from keri.kering import (
+    Ilks, MissingAnchorError, MissingDelegationError,
+    MissingWitnessSignatureError, OutOfOrderError, TopLevelStreamError,
+    ValidationError,
+)
 
 
 logger = help.ogler.getLogger()
@@ -52,6 +56,47 @@ def _asBytes(value):
     return value.encode("utf-8")
 
 
+class _HistoryParser(Parser):
+    """Keep malformed or rejected history distinct from missing dependencies."""
+
+    def __init__(self, **kwa):
+        super().__init__(**kwa)
+        self.errors = []
+
+    def msgParsator(self, *args, **kwa):
+        try:
+            exts = yield from super().msgParsator(*args, **kwa)
+            if (not isinstance(exts.serder, SerderKERI)
+                    or exts.serder.ilk not in (Ilks.icp, Ilks.rot, Ilks.ixn, Ilks.dip, Ilks.drt)):
+                raise ValidationError("bulk history contains a non-KEL message")
+            return exts
+        except TopLevelStreamError:
+            raise
+        except Exception as ex:
+            self.errors.append(ex)
+            raise
+
+    def groupParsator(self, *args, **kwa):
+        try:
+            return (yield from super().groupParsator(*args, **kwa))
+        except Exception as ex:
+            self.errors.append(ex)
+            raise
+
+    def msgProcess(self, exts, kvy, tvy, exc, rvy, vry):
+        try:
+            serder = exts["serder"]
+            if kvy.db.fons.get(keys=(serder.pre, serder.said)) is not None:
+                return None
+            return super().msgProcess(exts, kvy, tvy, exc, rvy, vry)
+        except (MissingWitnessSignatureError, MissingDelegationError, OutOfOrderError):
+            # Native Kevery escrows these events for a later complete replay.
+            raise
+        except Exception as ex:
+            self.errors.append(ex)
+            raise
+
+
 def ingestKel(kvy, kel):
     """Parse a CESR KEL stream into the observer Kevery / Habery Baser.
 
@@ -65,7 +110,13 @@ def ingestKel(kvy, kel):
     ims = bytearray(_asBytes(kel))
     if not ims:
         return
-    Parser(version=Vrsn_2_0).parse(ims=ims, kvy=kvy)
+    # Validate all framing before processing any event. The second pass still
+    # uses native signature, delegation, receipt and recovery verification.
+    for processive in (False, True):
+        parser = _HistoryParser(version=Vrsn_2_0)
+        parser.parse(ims=bytearray(ims), framed=True, kvy=kvy, processive=processive)
+        if parser.errors:
+            raise ValidationError("invalid bulk issuer history") from parser.errors[0]
     kvy.processEscrows()
 
 
@@ -290,6 +341,7 @@ class Observer:
 
     def last(self, regk):
         """Return the verified head event for a registry, or None."""
+        self.validate(regk)
         return self.store.headEvent(regk)
 
     def lastRaw(self, regk):
@@ -299,11 +351,25 @@ class Observer:
 
     def cloneTelIter(self, regk, sn=0):
         """Yield accepted TEL event bodies in sequence from sn inclusive."""
+        self.validate(regk)
         yield from self.store.cloneTelIter(regk, sn=sn)
 
     def clone(self, regk, sn=0):
         """Return verified TEL CESR for ``regk`` from ``sn`` inclusive."""
+        self.validate(regk)
         return self.store.cloneTel(regk, sn=sn)
+
+    def validate(self, regk):
+        """Recheck retained anchors against the currently accepted issuer KEL.
+
+        A recovery rotation can supersede an anchor after the TEL was stored.
+        Retain the historical evidence but never serve it as currently verified.
+        This check performs no network requests.
+        """
+        if self.store.head(regk) is None:
+            return
+        chain = parseTelStream(self.store.cloneTel(regk))
+        regeventing.vet(rip=chain[0], updates=chain[1:], db=self.hby.db)
 
     def hasRegistry(self, regk):
         """True when at least one verified event is stored for ``regk``."""

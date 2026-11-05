@@ -19,7 +19,7 @@ from keri.db.basing import BaserDoer
 
 from kfobserver.app import httping
 from kfobserver.core.observing import Observer
-from kfobserver.core.pulling import RegistrarPuller, pullDo
+from kfobserver.core.pulling import RegistrarPuller
 
 
 logger = help.ogler.getLogger()
@@ -70,25 +70,13 @@ class Context(doing.DoDoer):
         self.app = None
         super(Context, self).__init__(doers=[doing.doify(self.escrowDo)])
 
-    def pullRegistry(self, regk):
-        """Cooperative on-demand bulk pull for one registry SAID from configured registrars.
-
-        Returns:
-            dict | None: last non-empty ingest summary, or None if nothing pulled.
-        """
-        summary = None
-        for url in self.registrars:
-            raw = yield from pullDo(self, self.hab, url, regk=regk)
-            if raw:
-                summary = self.observer.ingest(raw, kvy=self.kvy)
-        return summary
-
     def escrowDo(self, tymth=None, tock=0.0, **kwa):
         """Retry pending TEL batches when issuer KEL anchors arrive."""
         self.wind(tymth)
         self.tock = tock
         _ = yield self.tock
         while True:
+            self.kvy.processEscrows()
             self.observer.retryPending()
             yield self.tock
 
