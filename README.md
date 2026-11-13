@@ -24,11 +24,13 @@ wallet / verifier  -->  kf-observer  -->  kf-registrar (bulk only)
 - **Serve** (default `127.0.0.1:6633`): signed V2 `qry` POST for one registry
   SAID — last / all / since `sn`. No blinded-attribute disclosure. No
   “is this ACDC issued?” business logic (that is `vet` on the verifier).
-  Queries only read the local verified cache. Unknown registries return 404;
-  registries awaiting issuer evidence return 503. Clients may retry after a
-  background poll. A wallet query never triggers a registrar request.
+  Queries read the local verified cache. An unknown registry returns 404.
+  A pending update returns 503 even if an earlier head was verified. Retry after
+  a background poll. Conflicting issuer-anchored updates at one sequence return 409.
+  A wallet query never triggers a registrar request.
   Stored TEL anchors are checked against the current accepted issuer KEL before
-  serving, including after a recovery rotation replaces an earlier anchor.
+  serving. If issuer recovery displaces an accepted update, a verified replay
+  replaces the affected registry history. The observer retains the old events.
 
 ## Query contract (wallet / verifier / IPEX)
 

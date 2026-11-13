@@ -15,7 +15,7 @@ from keri import Vrsn_1_0, Vrsn_2_0
 from keri.acdc import acdcmap, blindate, regcept
 from keri.app.habbing import openHby
 from keri.app.httping import CESR_CONTENT_TYPE
-from keri.core import Blinder, Parser, SerderACDC, SerderKERI, Texter, eventing, query
+from keri.core import Blinder, Parser, SerderKERI, Texter, eventing, query
 from keri.core.coring import Diger
 from keri.core.counting import Codens, Counter
 from keri.core.signing import Salter
@@ -59,16 +59,6 @@ def _telQuery(hab, regk, route="tels", **qextra):
         stamp=helping.nowIso8601(),
         version=Vrsn_2_0,
     )
-
-
-def _telIlks(raw):
-    ims = bytearray(raw)
-    ilks = []
-    while ims:
-        serder = SerderACDC(raw=ims)
-        ilks.append(serder.ilk)
-        del ims[: serder.size]
-    return ilks
 
 
 def _seedObserverTel(hby, issuer):
@@ -590,7 +580,6 @@ def test_wallet_query_last_all_since_sn():
     """Signed tels / tels/head queries return verified CESR only."""
     with openHby(name="kf-obs-http", base="test", temp=True, version=Vrsn_2_0) as hby:
         issuer = hby.makeHab(name="issuer")
-        observerHab = hby.makeHab(name="observer")
         wallet = hby.makeHab(name="wallet")
         ripper, bup, _blinder, _acdc, stream = _seedObserverTel(hby, issuer)
 
@@ -606,7 +595,6 @@ def test_wallet_query_last_all_since_sn():
             assert allResp.status == falcon.HTTP_200
             assert allResp.headers["content-type"] == CESR_CONTENT_TYPE
             assert allResp.content == stream
-            assert _telIlks(allResp.content) == ["rip", "bup"]
 
             sinceQry = _telQuery(wallet, ripper.said, route="tels", sn=1)
             sinceResp = _postCesr(client, wallet, sinceQry)
@@ -626,8 +614,27 @@ def test_wallet_query_last_all_since_sn():
             bulkResp = _postCesr(client, wallet, bulk)
             assert bulkResp.status == falcon.HTTP_403
 
-            # unused but proves observer hab exists for ops
-            assert observerHab.pre == ctx.hab.pre
+            update = blindate(regid=ripper.said, prior=bup.said, blid=bup.sad["b"], sn=2)
+            assert ripper.said in ctx.observer.ingest(stream + update.raw)["pending"]
+            for route in ("tels/head", "tels"):
+                qry = _telQuery(wallet, ripper.said, route=route)
+                assert _postCesr(client, wallet, qry).status == falcon.HTTP_503
+
+            anchor(issuer, update)
+            ctx.observer.retryPending()
+            qry = _telQuery(wallet, ripper.said, route="tels/head")
+            assert _postCesr(client, wallet, qry).content == update.raw
+
+            sibling = blindate(regid=ripper.said, prior=bup.said, blid=bup.sad["b"], sn=2,
+                               stamp=STAMP1)
+            anchor(issuer, sibling)
+            pending = blindate(regid=ripper.said, prior=bup.said, blid=bup.sad["b"], sn=2,
+                               stamp=STAMP0)
+            assert ripper.said in ctx.observer.ingest(stream + sibling.raw + pending.raw)["pending"]
+            for route in ("tels/head", "tels"):
+                qry = _telQuery(wallet, ripper.said, route=route)
+                assert _postCesr(client, wallet, qry).status == falcon.HTTP_409
+
         finally:
             ctx.observer.close()
 
