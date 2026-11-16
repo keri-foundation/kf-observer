@@ -5,11 +5,15 @@ tests.kfobserver.test_observing module
 Ingest, query, and reject-unverified tests for the observer TEL store.
 """
 
+import pytest
+
 from keri import Vrsn_2_0, Ilks
-from keri.acdc import acdcmap, blindate, regeventing, regcept
+from keri.acdc import Regery, acdcmap, blindate, regeventing, regcept
+from keri.acdc.regbasing import RegBaser
 from keri.app import habbing
-from keri.core import Blinder, SerderACDC
+from keri.core import Blinder, SerderACDC, rotate
 from keri.core.signing import Salter
+from keri.kering import DuplicitousRegistryError, MissingAnchorError
 
 from kfobserver.core.observing import Observer, parseTelStream
 
@@ -63,6 +67,11 @@ def telStream(*serders):
     return bytes(stream)
 
 
+def openObserver(hby, path):
+    baser = RegBaser(name=hby.name, temp=False, headDirPath=str(path))
+    return Observer(hby=hby, rgy=Regery(hby=hby, baser=baser))
+
+
 def test_ingest_bulk_clone_stores_verified_heads():
     """Ingest a contiguous rip+bup clone; heads match the source TEL."""
     with habbing.openHab(name="obs-ingest", temp=True, version=Vrsn_2_0) as (hby, hab):
@@ -107,8 +116,8 @@ def test_query_last_all_since_sn():
             observer.close()
 
 
-def test_unanchored_bulk_is_not_served():
-    """Missing KEL anchors escrows the batch; head stays empty."""
+def test_unanchored_bulk_is_not_served(tmp_path):
+    """A shorter accepted replay and a restart preserve the pending update."""
     with habbing.openHab(name="obs-anchor", temp=True, version=Vrsn_2_0) as (hby, hab):
         ripper = makeRegistry(hab, anchored=False)
         acdc = makeAcdc(hab, regid=ripper.said)
@@ -116,15 +125,22 @@ def test_unanchored_bulk_is_not_served():
             ripper.said, ripper.said, acdc.said, "issued", sn=1, stamp=STAMP1
         )
 
-        observer = Observer(hby=hby)
+        observer = openObserver(hby, tmp_path)
         try:
             summary = observer.ingest(telStream(ripper, bup))
             assert ripper.said in summary["pending"]
             assert not observer.hasRegistry(ripper.said)
-            assert observer.clone(ripper.said) == b""
+            with pytest.raises(MissingAnchorError):
+                observer.clone(ripper.said)
 
-            # After anchors land, retry accepts.
-            anchor(hab, ripper, bup)
+            anchor(hab, ripper)
+            assert ripper.said in observer.ingest(ripper.raw)["accepted"]
+            observer.close()
+            observer = openObserver(hby, tmp_path)
+            with pytest.raises(MissingAnchorError):
+                observer.last(ripper.said)
+
+            anchor(hab, bup)
             retried = observer.retryPending()
             assert ripper.said in retried["accepted"]
             assert observer.last(ripper.said).said == bup.said
@@ -132,8 +148,9 @@ def test_unanchored_bulk_is_not_served():
             observer.close()
 
 
-def test_conflicting_anchored_tel_fork_does_not_replace_history():
-    """A second valid seal for one registry sequence cannot replace its history."""
+@pytest.mark.parametrize("delivery", ["first", "second", "together", "after-recovery"])
+def test_conflicting_anchored_tel_fork_recovers_on_verified_replay(tmp_path, delivery):
+    """Either delivery order and a single bulk fork withhold the registry on reopen."""
     with habbing.openHab(name="obs-fork", temp=True, version=Vrsn_2_0) as (hby, hab):
         ripper = makeRegistry(hab)
         acdc = makeAcdc(hab, regid=ripper.said, name="forked-history")
@@ -149,31 +166,68 @@ def test_conflicting_anchored_tel_fork_does_not_replace_history():
             stamp=STAMP1,
             salt=Salter(raw=b"fedcba9876543210").qb64,
         )
-        anchor(hab, first, second)
+        prior = anchor(hab, first)
+        _, tail = makeUpdate(ripper.said, second.said, acdc.said, "issued", sn=2)
+        anchor(hab, second, tail)
 
-        observer = Observer(hby=hby)
+        observer = openObserver(hby, tmp_path)
         try:
-            assert ripper.said in observer.ingest(telStream(ripper, first))["accepted"]
-            result = observer.ingest(telStream(ripper, second))
-            assert ripper.said in result["rejected"]
-            assert observer.last(ripper.said).said == first.said
+            if delivery == "after-recovery":
+                observer.ingest(telStream(ripper, first))
+            elif delivery == "together":
+                result = observer.ingest(telStream(ripper, first, second))
+            else:
+                accepted, other = (first, second) if delivery == "first" else (second, first)
+                branch = (second, tail) if delivery == "second" else (first,)
+                assert ripper.said in observer.ingest(telStream(ripper, *branch))["accepted"]
+                result = observer.ingest(telStream(ripper, other))
+                assert observer.store.seqSaider(ripper.said, 1).qb64 == accepted.said
+            if delivery != "after-recovery":
+                assert ripper.said in result["rejected"]
+                observer.close()
+                observer = openObserver(hby, tmp_path)
+                with pytest.raises(DuplicitousRegistryError):
+                    observer.clone(ripper.said)
+
+            # Supersede the second anchor, then restore it without redelivering its TEL.
+            verfers, digers = hby.mgr.rotate(pre=hab.pre, temp=True)
+            recovery = rotate(pre=hab.pre, keys=[v.qb64 for v in verfers],
+                              dig=prior.said, sn=prior.sn + 1,
+                              ndigs=[d.qb64 for d in digers], version=Vrsn_2_0)
+            sigers = hab.sign(ser=recovery.raw, verfers=verfers, rotated=True)
+            hby.kvy.processEvent(serder=recovery, sigers=sigers)
+            if delivery in ("second", "together"):
+                with pytest.raises(MissingAnchorError):
+                    observer.last(ripper.said)
+                full = (first, second, tail) if delivery == "together" else (first,)
+                replay = observer.ingest(telStream(ripper, *full))
+                assert ripper.said in replay["accepted"]
+            if delivery in ("second", "after-recovery"):
+                stale = observer.ingest(telStream(ripper, second, tail))
+                assert ripper.said in stale["rejected"]
+                observer.close()
+                observer = openObserver(hby, tmp_path)
             assert observer.clone(ripper.said) == telStream(ripper, first)
+            assert observer.last(ripper.said).said == first.said
+            if delivery == "after-recovery":
+                _, nextUpdate = makeUpdate(ripper.said, first.said, acdc.said, "revoked", sn=2)
+                mixed = telStream(ripper, first, second, tail, nextUpdate)
+                assert ripper.said in observer.ingest(mixed)["pending"]
+                anchor(hab, nextUpdate)
+                observer.retryPending()
+                assert observer.last(ripper.said).said == nextUpdate.said
+            anchor(hab, second)
+            with pytest.raises(DuplicitousRegistryError):
+                observer.last(ripper.said)
         finally:
             observer.close()
 
-        reverse = Observer(hby=hby, name="obs-fork-reverse", base="test")
-        try:
-            assert ripper.said in reverse.ingest(telStream(ripper, second))["accepted"]
-            result = reverse.ingest(telStream(ripper, first))
-            assert ripper.said in result["rejected"]
-            assert reverse.last(ripper.said).said == second.said
-            assert reverse.clone(ripper.said) == telStream(ripper, second)
-        finally:
-            reverse.close()
 
-
-def test_replay_of_older_tel_keeps_head_monotonic_and_forward_progress_works():
-    """Known history replay leaves the head in place; a newer event advances it."""
+@pytest.mark.parametrize("missing_head", [True, False], ids=["missing", "stale"])
+def test_replay_repairs_head_preserves_history_and_allows_forward_progress(
+    tmp_path, missing_head
+):
+    """Replay repairs an interrupted head write without replacing accepted history."""
     with habbing.openHab(name="obs-replay", temp=True, version=Vrsn_2_0) as (hby, hab):
         ripper = makeRegistry(hab)
         acdc = makeAcdc(hab, regid=ripper.said, name="monotonic-history")
@@ -188,13 +242,31 @@ def test_replay_of_older_tel_keeps_head_monotonic_and_forward_progress_works():
         )
         anchor(hab, first, second, third)
 
-        observer = Observer(hby=hby)
+        observer = openObserver(hby, tmp_path)
         try:
             assert (
                 ripper.said
                 in observer.ingest(telStream(ripper, first, second))["accepted"]
             )
             assert observer.last(ripper.said).said == second.said
+            slots = [observer.store.seqSaider(ripper.said, sn).qb64 for sn in range(3)]
+            if missing_head:
+                observer.store.baser.heads.rem(keys=ripper.said)
+            else:
+                observer.store.baser.heads.pin(
+                    keys=ripper.said, val=observer.store.seqSaider(ripper.said, 0)
+                )
+            observer.close()
+            observer = openObserver(hby, tmp_path)
+            assert (
+                ripper.said
+                in observer.ingest(telStream(ripper, first, second))["accepted"]
+            )
+            assert observer.hasRegistry(ripper.said)
+            assert observer.last(ripper.said).said == second.said
+            assert [
+                observer.store.seqSaider(ripper.said, sn).qb64 for sn in range(3)
+            ] == slots
             assert ripper.said in observer.ingest(telStream(ripper, first))["accepted"]
             assert observer.last(ripper.said).said == second.said
             assert observer.clone(ripper.said) == telStream(ripper, first, second)

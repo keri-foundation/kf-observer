@@ -8,7 +8,6 @@ Falcon resources for the wallet/verifier verified-TEL query face.
 import json
 
 import falcon
-from hio.help import helping as hiohelping
 from keri import Vrsn_2_0
 from keri.app.httping import CESR_ATTACHMENT_HEADER, CESR_CONTENT_TYPE
 from keri.core import Number, Parser, SerderKERI
@@ -18,9 +17,11 @@ from keri.kering import (
     MaterialError,
     MissingAuthAttachmentError,
     MissingSenderKeyStateError,
-    Ilks,
+    MissingAnchorError,
     ValidationError,
 )
+
+from kfobserver.core.observing import KELReplayParser
 
 
 # Fine-grained wallet/verifier routes (one registry SAID).
@@ -29,37 +30,20 @@ QUERY_ROUTES = ("tels", "tels/head")
 BULK_ROUTES = ("tels/bulk", "regs")
 # shortcut: 8 MiB request-data limit, raise after measuring caller histories.
 PUT_BODY_LIMIT = 8 * 1024 * 1024
-KEL_ILKS = (Ilks.icp, Ilks.rot, Ilks.ixn, Ilks.dip, Ilks.drt)
 
 
-class _KELReplayParser(Parser):
-    """Track parser failures and skip accepted events during recovery replay."""
+class _IntroductionParser(KELReplayParser):
+    """Track every event in a public single-identifier introduction."""
 
     def __init__(self, **kwa):
         super().__init__(**kwa)
         self.events = []
-        self.errors = []
 
     def msgParsator(self, *args, **kwa):
-        try:
-            exts = yield from super().msgParsator(*args, **kwa)
-        except Exception as ex:
-            self.errors.append(ex)
-            raise
+        exts = yield from super().msgParsator(*args, **kwa)
         serder = exts.serder
-        if not isinstance(serder, SerderKERI) or serder.ilk not in KEL_ILKS:
-            ex = ValidationError("replay contains a non-KEL message")
-            self.errors.append(ex)
-            raise ex
         self.events.append((serder.pre, serder.sn, serder.said))
         return exts
-
-    def groupParsator(self, *args, **kwa):
-        try:
-            return (yield from super().groupParsator(*args, **kwa))
-        except Exception as ex:
-            self.errors.append(ex)
-            raise
 
     def msgProcess(self, exts, kvy, tvy, exc, rvy, vry):
         try:
@@ -76,7 +60,7 @@ def _parseKELReplay(raw, kvy):
     """Require accepted single-AID KEL events with valid CESR attachments."""
     events = None
     for processive in (False, True):
-        parser = _KELReplayParser(version=Vrsn_2_0)
+        parser = _IntroductionParser(version=Vrsn_2_0)
         parser.parse(ims=bytearray(raw), framed=True, kvy=kvy, processive=processive)
         unexpected = next(
             (
@@ -252,6 +236,12 @@ class TelQueryEnd:
 
         kramer = self.ctx.kvy.kramer
         if kramer is not None:
+            # KRAM's get() sees only cached Kevers. Reload accepted sender
+            # history after a restart before applying normal authentication.
+            try:
+                self.ctx.kvy.kevers[serder.pre]
+            except KeyError:
+                pass  # KRAM retains responsibility for unknown-sender rejection.
             kramer.reconcileConfig()
             try:
                 result = kramer.intake(serder, kwa)
@@ -265,46 +255,30 @@ class TelQueryEnd:
             raise falcon.HTTPBadRequest(
                 description="q.i must be a single registry SAID"
             )
-        if not self.ctx.observer.hasRegistry(regk) and self.ctx.registrars:
-            # HIO advances the stream cooperatively and defers status until data.
-            rep.stream = self.queryDo(regk, route, qry)
-            return
-        data = self.queryData(regk, route, qry)
+        try:
+            data = self.queryData(regk, route, qry)
+        except MissingAnchorError as ex:
+            raise falcon.HTTPServiceUnavailable(
+                description="Registry anchors await accepted issuer history"
+            ) from ex
+        except ValidationError as ex:
+            raise falcon.HTTPConflict(
+                description="Registry history failed verification"
+            ) from ex
         rep.set_header("Content-Type", CESR_CONTENT_TYPE)
         rep.status = falcon.HTTP_200
         rep.data = data
 
-    @hiohelping.attributize
-    def queryDo(self, me, regk, route, qry):
-        """Defer the TEL response while HIO services the registrar request."""
-        yield from self.ctx.pullRegistry(regk)
-        try:
-            data = self.queryData(regk, route, qry)
-        except falcon.HTTPError as ex:
-            me._status = ex.status
-            me._headers = {"Content-Type": "application/json"}
-            yield ex.to_json()
-        else:
-            me._status = falcon.HTTP_200
-            me._headers = {"Content-Type": CESR_CONTENT_TYPE}
-            yield data
-
     def queryData(self, regk, route, qry):
         """Read verified TEL or retain the existing missing/pending response."""
         if not self.ctx.observer.hasRegistry(regk):
-            if regk in self.ctx.observer.pending:
-                raise falcon.HTTPServiceUnavailable(
-                    description=(
-                        f"registry {regk} pending issuer KEL anchors; retry later"
-                    )
-                )
+            # A fork or an incomplete first batch can precede the first accepted head.
+            self.ctx.observer.validate(regk)
             raise falcon.HTTPNotFound(description=f"unknown registry {regk}")
-
         if route == "tels/head":
             return self.ctx.observer.lastRaw(regk)
         try:
             sn = _snFromQuery(qry)
         except (InvalidValueError, TypeError) as ex:
-            # Keep Falcon's existing 500 response even when rendering is deferred.
             raise falcon.HTTPInternalServerError() from ex
         return self.ctx.observer.clone(regk, sn=sn)
